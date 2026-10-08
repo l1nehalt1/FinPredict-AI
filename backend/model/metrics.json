@@ -1,0 +1,16 @@
+{
+  "available": true,
+  "model": "HistGradientBoostingRegressor",
+  "syntheticOnly": true,
+  "clients": 1000,
+  "trainingRows": 7000,
+  "validationRows": 1000,
+  "trainingThrough": "2026-08",
+  "validationMonth": "2026-09",
+  "maeKzt": 24202.81,
+  "wapePercent": 7.4,
+  "baselineMaeKzt": 39765.37,
+  "forecastStrategy": "recursive monthly prediction with lag features; recurring payments added separately",
+  "annualForecastValidated": false,
+  "sklearnVersion": "1.8.0"
+}

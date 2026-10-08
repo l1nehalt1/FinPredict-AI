@@ -1,0 +1,68 @@
+import {createRequire} from 'node:module';
+import fs from 'node:fs';
+import path from 'node:path';
+import assert from 'node:assert/strict';
+const require=createRequire(import.meta.url);
+const wreq=createRequire(require.resolve('wrangler/package.json'));
+const {Miniflare,Log,LogLevel}=wreq('miniflare');
+const root=path.resolve('.');
+const workerRoot=path.join(root,'dist/server');
+const files=fs.readdirSync(workerRoot,{recursive:true}).filter(f=>f.endsWith('.js')||f.endsWith('.mjs')||f.endsWith('.wasm'));
+const modules=['index.js',...files.filter(f=>f!=='index.js')].map(f=>({type:f.endsWith('.wasm')?'CompiledWasm':'ESModule',path:path.join(workerRoot,f)}));
+const mf=new Miniflare({modules,modulesRoot:workerRoot,compatibilityDate:'2026-05-15',compatibilityFlags:['nodejs_compat'],d1Databases:['DB'],modulesRules:[{type:'ESModule',include:['**/*.js','**/*.mjs']},{type:'CompiledWasm',include:['**/*.wasm']}],log:new Log(LogLevel.ERROR)});
+let passed=0;
+function check(v,label){assert.ok(v,label);passed++;console.log('PASS',label);}
+async function call(path,method='GET',body){const r=await mf.dispatchFetch('http://finpredict.test'+path,{method,headers:{'Content-Type':'application/json','Origin':'http://finpredict.test'},body:body===undefined?undefined:JSON.stringify(body)});const text=await r.text();let data;try{data=JSON.parse(text);}catch{data=text;}return {status:r.status,data};}
+try{
+ const db=await mf.getD1Database('DB');
+ const migration=fs.readFileSync('drizzle/0000_whole_sunfire.sql','utf8');
+ for(const sql of migration.split('--> statement-breakpoint').map(s=>s.trim()).filter(Boolean))await db.prepare(sql).run();
+ const [r,r2]=await Promise.all([call('/api/data?period=2026-09'),call('/api/data?period=2026-09')]);
+ if(r.status!==200)console.log('initial response',r.status,r.data);
+ check(r.status===200&&r2.status===200,'concurrent first load succeeds');
+ const d=r.data;
+ check(d.transactions.length===190&&r2.data.transactions.length===190,'demo seed happens exactly once');
+ const totalIncome=d.transactions.filter(t=>t.type==='income').reduce((s,t)=>s+t.amount,0);
+ const totalExpenses=d.transactions.filter(t=>t.type==='expense').reduce((s,t)=>s+t.amount,0);
+ check(d.summary.balance===d.account.opening+totalIncome-totalExpenses,'balance matches the ledger');
+ check(d.daily.at(-1).cumulative===d.summary.expenses,'daily chart agrees with monthly expenses');
+ check(d.categoryTotals.reduce((s,c)=>s+c.amount,0)===d.summary.expenses,'categories agree with monthly expenses');
+ const base=await call('/api/forecast?horizon=30&scenario=base&savings=0');
+ check(base.status===200&&base.data.daily.length===30&&base.data.total>0,'Python server produces a 30-day forecast');
+ check(base.data.endBalance===base.data.currentBalance+base.data.expectedIncome-base.data.total,'forecast cash balance conserves income and expenses');
+ const h60=await call('/api/forecast?horizon=60&scenario=base&savings=0');
+ const h90=await call('/api/forecast?horizon=90&scenario=base&savings=0');
+ check(h60.data.daily.length===60&&h90.data.daily.length===90&&h90.data.total>h60.data.total&&h60.data.total>base.data.total,'60 and 90-day horizons extend the projection');
+ const low=await call('/api/forecast?horizon=30&scenario=low&savings=0');
+ const high=await call('/api/forecast?horizon=30&scenario=high&savings=0');
+ const save=await call('/api/forecast?horizon=30&scenario=base&savings=30');
+ check(low.data.total<base.data.total&&high.data.total>base.data.total,'spending scenarios affect variable expenses');
+ check(save.data.total<base.data.total&&save.data.saved>0,'savings scenario lowers discretionary spending');
+ const created=await call('/api/transactions','POST',{date:'2026-09-28',description:'QA expense',category:'food',type:'expense',amount:1234500,recurring:false});
+ check(created.status===201,'expense is saved');
+ const after=(await call('/api/data?period=2026-09')).data;
+ check(after.summary.balance===d.summary.balance-1234500&&after.summary.expenses===d.summary.expenses+1234500,'new expense updates balance and monthly totals');
+ const afterForecast=(await call('/api/forecast?horizon=30&scenario=base&savings=0')).data;
+ check(afterForecast.total>base.data.total,'historical expense updates the forecast');
+ check((await call('/api/data?period=2026-09')).data.transactions.some(t=>t.id===created.data.id),'saved transaction survives subsequent requests');
+ const income=await call('/api/transactions','POST',{date:'2026-10-04',description:'QA income',category:'freelance',type:'income',amount:1000000,recurring:false});
+ const october=(await call('/api/data?period=2026-10')).data;
+ check(income.status===201&&october.summary.balance===after.summary.balance+1000000,'income updates the account');
+ check(october.daily.length===4,'partial October period stops at the demo as-of date');
+ for(const invalid of [{amount:-1},{date:'2026-09-31'},{date:'2026-11-01'},{description:''},{category:'unknown'},{amount:1.5}]){const result=await call('/api/transactions','POST',{date:'2026-09-28',description:'QA invalid',category:'food',type:'expense',amount:100,recurring:false,...invalid});check(result.status===400,'invalid transaction rejected: '+JSON.stringify(invalid));}
+ check((await call('/api/forecast?horizon=7')).status===400,'unsupported forecast horizon rejected');
+ check((await call('/api/data?period=2026-11')).status===400,'unsupported period rejected');
+ const csrf=await mf.dispatchFetch('http://finpredict.test/api/reset',{method:'POST',headers:{'Content-Type':'application/json',Origin:'https://other.test'},body:'{}'});
+ check(csrf.status===403,'cross-origin write rejected');
+ check((await call('/api/transactions?id='+created.data.id,'DELETE')).status===200,'transaction deletion succeeds');
+ const del=(await call('/api/data?period=2026-09')).data;
+ check(del.summary.expenses===d.summary.expenses,'deletion restores monthly expenses');
+ check((await call('/api/reset','POST',{})).status===200,'demo reset succeeds');
+ const restored=(await call('/api/data?period=2026-09')).data;
+ check(restored.transactions.length===190&&restored.summary.balance===d.summary.balance,'reset restores the original dataset');
+ const homepage=await mf.dispatchFetch('http://finpredict.test/');
+ const html=await homepage.text();
+ check(homepage.status===200&&html.includes('Финансовый обзор')&&html.includes('FinPredict'),'HTML page renders application content');
+ fs.writeFileSync('tests/verification.json',JSON.stringify({passed,rows:190,summary:d.summary,forecast30:{total:base.data.total,low:base.data.low,high:base.data.high},browserUI:'Unavailable: no control-browser skill in this environment',sqlServer:'Schema and adapter prepared; no SQL Server instance provided',webMCP:'Supported browser context unavailable'},null,2));
+ console.log(`${passed} checks passed`);
+}finally{await mf.dispose();}

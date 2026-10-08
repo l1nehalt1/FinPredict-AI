@@ -1,0 +1,10 @@
+{
+  "synthetic": true,
+  "clients": 1000,
+  "transactions": 423087,
+  "historyStart": "2025-10-08",
+  "asOf": "2026-10-07",
+  "historyDays": 365,
+  "historicalExpensesTiyn": 564902999395,
+  "seed": 20261007
+}
