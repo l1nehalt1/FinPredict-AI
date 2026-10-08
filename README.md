@@ -118,3 +118,14 @@ explicitly imported synthetic demo clients have prepopulated annual histories.
 Reading a dashboard or adding an operation never auto-seeds an account. Demo
 reset is allowed only for an imported demo client's primary account; the reset
 button is hidden for ordinary clients. Existing histories are preserved.
+
+## Скриншоты
+
+### Главная страница
+![Главная страница](docs/screenshots/head.png)
+
+### Вход
+![Вход](docs/screenshots/login.png)
+
+### Личный кабинет
+![Личный кабинет](docs/screenshots/dashboard.png)
